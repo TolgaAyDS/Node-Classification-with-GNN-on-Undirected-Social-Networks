@@ -5,7 +5,7 @@ import numpy as np
 import json
 
 import dgl
-from dgl.nn import GraphConv
+from dgl.nn import SAGEConv
 import torch.nn as nn
 import torch.nn.functional as F
 
@@ -17,20 +17,20 @@ def import_data(path):
 def import_json_to_matrix(path):
     dictionary=json.load(open(path))
     dictionary = {str(k): [str(val) for val in v] for k, v in dictionary.items()}
-    matrix = np.zeros((len(dictionary), len(dictionary)), dtype=int)
+    matrix = np.zeros((len(dictionary), 33000), dtype=int)
     for key in dictionary.keys():
         for value in range(len(dictionary[key])):
             matrix[int(key)][int(dictionary[key][value])] = 1
-
+    matrix = matrix[:, np.any(matrix, axis=0)]
     return matrix
 
 def creating_graph(validation=True):
 
     # To tensor
     node_features = torch.tensor(features_matrix).float()
-    edges_src = torch.from_numpy(edges['id_1'].to_numpy())
-    edges_dst = torch.from_numpy(edges['id_2'].to_numpy())
-    node_labels = torch.from_numpy(targets['ml_target'].to_numpy())
+    edges_src = torch.from_numpy(edges['node_1'].to_numpy())
+    edges_dst = torch.from_numpy(edges['node_2'].to_numpy())
+    node_labels = torch.from_numpy(targets['target'].to_numpy())
 
     # Creating graph
     graph = dgl.graph((edges_src, edges_dst), num_nodes=targets.shape[0])
@@ -79,17 +79,23 @@ def creating_graph(validation=True):
 
         return graph, node_features, node_labels, train_mask, test_mask
 
-class GCN(nn.Module):
-    def __init__(self, in_feats, h_feats, num_classes):
-        super(GCN, self).__init__()
-        self.conv1 = GraphConv(in_feats, h_feats)
-        self.conv2 = GraphConv(h_feats, num_classes)
+class GraphSAGE(torch.nn.Module):
+  """GraphSAGE"""
+  def __init__(self, dim_in, dim_h, dim_out, aggrator_type="mean"):
+    super().__init__()
+    self.sage1 = SAGEConv(dim_in, dim_h,aggrator_type)
+    self.sage2 = SAGEConv(dim_h, dim_out,aggrator_type)
+    self.optimizer = torch.optim.Adam(self.parameters(),
+                                      lr=0.01,
+                                      weight_decay=5e-4)
 
-    def forward(self, g, in_feat):
-        h = self.conv1(g, in_feat)
-        h = F.relu(h)
-        h = self.conv2(g, h)
-        return h
+  def forward(self, x, edge_index):
+    h = self.sage1(x, edge_index)
+    h = torch.relu(h)
+    h = F.dropout(h, p=0.5, training=self.training)
+    h = self.sage2(h, edge_index)
+    return h, F.log_softmax(h, dim=1)
+
 
 def train(g, model,features,labels,train_mask,val_mask,test_mask, epoch_number):
     optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
@@ -122,8 +128,7 @@ def train(g, model,features,labels,train_mask,val_mask,test_mask, epoch_number):
         loss.backward()
         optimizer.step()
 
-        if e % 5 == 0:
-            print('In epoch {}, loss: {:.3f}, val acc: {:.3f} (best {:.3f}), test acc: {:.3f} (best {:.3f})'.format(
+        print('In epoch {}, loss: {:.3f}, val acc: {:.3f} (best {:.3f}), test acc: {:.3f} (best {:.3f})'.format(
                 e, loss, val_acc, best_val_acc, test_acc, best_test_acc))
 
 def run(epoch_num=100,validation=True):
@@ -135,38 +140,80 @@ def run(epoch_num=100,validation=True):
         graph,node_features,node_labels,train_mask,test_mask=creating_graph(validation=False)
 
 
-    model = GCN(graph.ndata['feat'].shape[1], 5000, 2)
-
-    # print out the hyperparameters
-    print("Hyperparameters of the GCN model:")
-    print(f"Input feature dimension: {model.conv1._in_feats}")
-    print(f"Hidden feature dimension: {model.conv1._out_feats}")
-    print(f"Number of classes: {model.conv2._out_feats}")
-    print(f"Number of layers: {2}")
-
-    # print out the model architecture
-    print("Architecture of the GCN model:")
-    print(model)
-
-    # print out the trainable parameters
-    print("Trainable parameters of the GCN model:")
-    for name, param in model.named_parameters():
-        if param.requires_grad:
-            print(name, param.data.shape)
-
+    model = GraphSAGE(graph.ndata['feat'].shape[1], 5000, 2)
     train(graph, model, node_features, node_labels, train_mask, val_mask, test_mask, epoch_num)
+
+
+from torch_geometric.loader import NeighborLoader
+
+# Create batches with neighbor sampling
+train_loader = NeighborLoader(
+    data,
+    num_neighbors=[5, 10],
+    batch_size=16,
+    input_nodes=data.train_mask,
+)
+
+class GraphSAGE(torch.nn.Module):
+  """GraphSAGE"""
+  def __init__(self, dim_in, dim_h, dim_out):
+    super().__init__()
+    self.sage1 = SAGEConv(dim_in, dim_h)
+    self.sage2 = SAGEConv(dim_h, dim_out)
+    self.optimizer = torch.optim.Adam(self.parameters(),
+                                      lr=0.01,
+                                      weight_decay=5e-4)
+
+  def forward(self, x, edge_index):
+    h = self.sage1(x, edge_index)
+    h = torch.relu(h)
+    h = F.dropout(h, p=0.5, training=self.training)
+    h = self.sage2(h, edge_index)
+    return h, F.log_softmax(h, dim=1)
+
+  def fit(self, data, epochs):
+    criterion = torch.nn.CrossEntropyLoss()
+    optimizer = self.optimizer
+
+    self.train()
+    for epoch in range(epochs+1):
+      acc = 0
+      val_loss = 0
+      val_acc = 0
+
+      # Train on batches
+      for batch in train_loader:
+        optimizer.zero_grad()
+        _, out = self(batch.x, batch.edge_index)
+        loss = criterion(out[batch.train_mask], batch.y[batch.train_mask])
+        acc += accuracy(out[batch.train_mask].argmax(dim=1),
+                        batch.y[batch.train_mask])
+        loss.backward()
+        optimizer.step()
+
+        # Validation
+        val_loss += criterion(out[batch.val_mask], batch.y[batch.val_mask])
+        val_acc += accuracy(out[batch.val_mask].argmax(dim=1),
+                            batch.y[batch.val_mask])
+
+      # Print metrics every 10 epochs
+      if(epoch % 10 == 0):
+          print(f'Epoch {epoch:>3} | Train Loss: {loss/len(train_loader):.3f} '
+                f'| Train Acc: {acc/len(train_loader)*100:>6.2f}% | Val Loss: '
+                f'{val_loss/len(train_loader):.2f} | Val Acc: '
+                f'{val_acc/len(train_loader)*100:.2f}%')
 
 if __name__ == "__main__":
 
     # Importing datasets
-    edges_path = '../../data/Github/git_edges.csv'
-    targets_path = '../../data/GitHub/git_target.csv'
-    features_path = '../../data/GitHub/git.json'
+    edges_path = '../../data/deezer_europe/deezer_europe_edges.csv'
+    targets_path = '../../data/deezer_europe/deezer_europe_target.csv'
+    features_path = '../../data/deezer_europe/deezer_europe_features.json'
 
     edges = import_data(edges_path)
     targets = import_data(targets_path)
     features_matrix= import_json_to_matrix(features_path)
 
     # Running
-    run()
+    run(epoch_num=100)
 
