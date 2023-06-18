@@ -9,7 +9,8 @@ from dgl.nn import GraphConv
 import torch.nn as nn
 import torch.nn.functional as F
 
-
+import time
+start_time = time.time()
 def import_data(path):
     df=pd.read_csv(path)
     return df
@@ -30,7 +31,7 @@ def creating_graph(validation=True):
     node_features = torch.tensor(features_matrix).float()
     edges_src = torch.from_numpy(edges['id_1'].to_numpy())
     edges_dst = torch.from_numpy(edges['id_2'].to_numpy())
-    node_labels = torch.from_numpy(targets['ml_target'].to_numpy())
+    node_labels = torch.from_numpy(targets['page_type'].astype('category').cat.codes.to_numpy()).long()
 
     # Creating graph
     graph = dgl.graph((edges_src, edges_dst), num_nodes=targets.shape[0])
@@ -80,15 +81,17 @@ def creating_graph(validation=True):
         return graph, node_features, node_labels, train_mask, test_mask
 
 class GCN(nn.Module):
-    def __init__(self, in_feats, h_feats, num_classes):
+    def __init__(self, in_feats, h1_feats, h2_feats, num_classes):
         super(GCN, self).__init__()
-        self.conv1 = GraphConv(in_feats, h_feats)
-        self.conv2 = GraphConv(h_feats, num_classes)
+        self.conv1 = GraphConv(in_feats, h1_feats)
+        self.conv2 = GraphConv(h1_feats, h2_feats)
+        self.conv3 = GraphConv(h2_feats, num_classes)
+        self.activation = nn.ReLU()
 
     def forward(self, g, in_feat):
-        h = self.conv1(g, in_feat)
-        h = F.relu(h)
-        h = self.conv2(g, h)
+        h = self.activation(self.conv1(g, in_feat))
+        h = self.activation(self.conv2(g, h))
+        h = self.conv3(g, h)
         return h
 
 def train(g, model,features,labels,train_mask,val_mask,test_mask, epoch_number):
@@ -122,8 +125,7 @@ def train(g, model,features,labels,train_mask,val_mask,test_mask, epoch_number):
         loss.backward()
         optimizer.step()
 
-        if e % 5 == 0:
-            print('In epoch {}, loss: {:.3f}, val acc: {:.3f} (best {:.3f}), test acc: {:.3f} (best {:.3f})'.format(
+        print('In epoch {}, loss: {:.3f}, val acc: {:.3f} (best {:.3f}), test acc: {:.3f} (best {:.3f})'.format(
                 e, loss, val_acc, best_val_acc, test_acc, best_test_acc))
 
 def run(epoch_num=100,validation=True):
@@ -135,15 +137,34 @@ def run(epoch_num=100,validation=True):
         graph,node_features,node_labels,train_mask,test_mask=creating_graph(validation=False)
 
 
-    model = GCN(graph.ndata['feat'].shape[1], 5000, 2)
+    model = GCN(graph.ndata['feat'].shape[1], 1000, 50, 4)
+
+    # print out the hyperparameters
+    print("Hyperparameters of the GCN model:")
+    print(f"Input feature dimension: {model.conv1._in_feats}")
+    print(f"Hidden feature dimension 1: {model.conv1._out_feats}")
+    print(f"Hidden feature dimension 2: {model.conv2._out_feats}")
+    print(f"Number of classes: {model.conv3._out_feats}")
+    print(f"Number of layers: {3}")
+
+    # print out the model architecture
+    print("Architecture of the GCN model:")
+    print(model)
+
+    # print out the trainable parameters
+    print("Trainable parameters of the GCN model:")
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            print(name, param.data.shape)
+
     train(graph, model, node_features, node_labels, train_mask, val_mask, test_mask, epoch_num)
 
 if __name__ == "__main__":
 
     # Importing datasets
-    edges_path = '../../data/Github/git_edges.csv'
-    targets_path = '../../data/GitHub/git_target.csv'
-    features_path = '../../data/GitHub/git.json'
+    edges_path = '../../data/Facebook/facebook_edges.csv'
+    targets_path = '../../data/Facebook/facebook_target.csv'
+    features_path = '../../data/Facebook/facebook_features.json'
 
     edges = import_data(edges_path)
     targets = import_data(targets_path)
@@ -152,3 +173,5 @@ if __name__ == "__main__":
     # Running
     run()
 
+    # Runtime
+    print("time elapsed: {:.2f}s".format(time.time() - start_time))

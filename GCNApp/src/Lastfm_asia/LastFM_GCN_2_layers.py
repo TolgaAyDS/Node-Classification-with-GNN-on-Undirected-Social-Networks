@@ -9,6 +9,8 @@ from dgl.nn import GraphConv
 import torch.nn as nn
 import torch.nn.functional as F
 
+import time
+start_time = time.time()
 
 def import_data(path):
     df=pd.read_csv(path)
@@ -17,7 +19,7 @@ def import_data(path):
 def import_json_to_matrix(path):
     dictionary=json.load(open(path))
     dictionary = {str(k): [str(val) for val in v] for k, v in dictionary.items()}
-    matrix = np.zeros((len(dictionary), 33000), dtype=int)
+    matrix = np.zeros((len(dictionary), 7842), dtype=int)
     for key in dictionary.keys():
         for value in range(len(dictionary[key])):
             matrix[int(key)][int(dictionary[key][value])] = 1
@@ -134,15 +136,17 @@ def run(epoch_num=100,validation=True):
         graph,node_features,node_labels,train_mask,test_mask=creating_graph(validation=False)
 
 
-    model = GCN(graph.ndata['feat'].shape[1], 5000, 2)
+    model = GCN(graph.ndata['feat'].shape[1], 50, 18)
+
+
     train(graph, model, node_features, node_labels, train_mask, val_mask, test_mask, epoch_num)
 
 if __name__ == "__main__":
 
     # Importing datasets
-    edges_path = '../../data/deezer_europe/deezer_europe_edges.csv'
-    targets_path = '../../data/deezer_europe/deezer_europe_target.csv'
-    features_path = '../../data/deezer_europe/deezer_europe_features.json'
+    edges_path = '../../data/lasftm_asia/lastfm_asia_edges.csv'
+    targets_path = '../../data/lasftm_asia/lastfm_asia_target.csv'
+    features_path = '../../data/lasftm_asia/lastfm_asia_features.json'
 
     edges = import_data(edges_path)
     targets = import_data(targets_path)
@@ -151,3 +155,5 @@ if __name__ == "__main__":
     # Running
     run(epoch_num=100)
 
+    # Runtime
+    print("time elapsed: {:.2f}s".format(time.time() - start_time))

@@ -1,14 +1,17 @@
-# Importing libraries
 import pandas as pd
 import torch
 import numpy as np
 import json
 
 import dgl
-from dgl.nn import GraphConv
+from dgl.nn import SAGEConv
 import torch.nn as nn
 import torch.nn.functional as F
 
+import time
+from itertools import product
+
+start_time = time.time()
 
 def import_data(path):
     df=pd.read_csv(path)
@@ -79,19 +82,26 @@ def creating_graph(validation=True):
 
         return graph, node_features, node_labels, train_mask, test_mask
 
-class GCN(nn.Module):
-    def __init__(self, in_feats, h_feats, num_classes):
-        super(GCN, self).__init__()
-        self.conv1 = GraphConv(in_feats, h_feats)
-        self.conv2 = GraphConv(h_feats, num_classes)
+class GraphSAGE(nn.Module):
+    def __init__(self, in_feats, hidden_feats, out_feats, num_layers, aggregator_type='mean'):
+        super(GraphSAGE, self).__init__()
+        self.convs = nn.ModuleList()
+        self.convs.append(SAGEConv(in_feats, hidden_feats, aggregator_type))
 
-    def forward(self, g, in_feat):
-        h = self.conv1(g, in_feat)
-        h = F.relu(h)
-        h = self.conv2(g, h)
+        for _ in range(num_layers - 2):
+            self.convs.append(SAGEConv(hidden_feats, hidden_feats, aggregator_type))
+
+        self.convs.append(SAGEConv(hidden_feats, out_feats, aggregator_type))
+
+    def forward(self, g, features):
+        h = features
+        for conv in self.convs:
+            h = conv(g, h)
+            h = F.relu(h)
         return h
 
-def train(g, model,features,labels,train_mask,val_mask,test_mask, epoch_number):
+
+def train(g, model, features, labels, train_mask, val_mask, test_mask, epoch_number):
     optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
     best_val_acc = 0
     best_test_acc = 0
@@ -123,22 +133,42 @@ def train(g, model,features,labels,train_mask,val_mask,test_mask, epoch_number):
         optimizer.step()
 
         print('In epoch {}, loss: {:.3f}, val acc: {:.3f} (best {:.3f}), test acc: {:.3f} (best {:.3f})'.format(
-                e, loss, val_acc, best_val_acc, test_acc, best_test_acc))
-
-def run(epoch_num=100,validation=True):
-
-    # Creating the graph
-    if validation:
-        graph,node_features,node_labels,train_mask,val_mask,test_mask=creating_graph()
-    else:
-        graph,node_features,node_labels,train_mask,test_mask=creating_graph(validation=False)
+            e, loss, val_acc, best_val_acc, test_acc, best_test_acc))
 
 
-    model = GCN(graph.ndata['feat'].shape[1], 5000, 4)
-    train(graph, model, node_features, node_labels, train_mask, val_mask, test_mask, epoch_num)
+def run(params, epoch_num=100, validation=True):
+    results = []
+
+    for param in params:
+        hidden_units, learning_rate, num_epochs, dropout_rate, weight_decay, activation = param
+
+        # Creating the graph
+        if validation:
+            graph, node_features, node_labels, train_mask, val_mask, test_mask = creating_graph()
+        else:
+            graph, node_features, node_labels, train_mask, test_mask = creating_graph(validation=False)
+
+        # Set the hyperparameters
+        in_feats = features_matrix.shape[1]  # Number of input features
+        out_feats = 4  # Number of output classes
+        num_layers = 2  # Number of GraphSAGE layers
+
+        # Create the GraphSAGE model
+        model = GraphSAGE(in_feats, hidden_units, out_feats, num_layers)
+
+        # print the parameters
+        print(hidden_units, learning_rate, num_epochs, dropout_rate, weight_decay, activation)
+
+        # Train the model
+        train(graph, model, node_features, node_labels, train_mask, val_mask, test_mask, num_epochs)
+
+        # Store the results
+        results.append((hidden_units, learning_rate, num_epochs, dropout_rate, weight_decay, activation))
+
+    return results
+
 
 if __name__ == "__main__":
-
     # Importing datasets
     edges_path = '../../data/Facebook/facebook_edges.csv'
     targets_path = '../../data/Facebook/facebook_target.csv'
@@ -146,8 +176,38 @@ if __name__ == "__main__":
 
     edges = import_data(edges_path)
     targets = import_data(targets_path)
-    features_matrix= import_json_to_matrix(features_path)
+    features_matrix = import_json_to_matrix(features_path)
 
-    # Running
-    run(validation=False)
+    # Example hyperparameters for tuning
+    param_grid = {
+        'hidden_units': [50, 5000],
+        'learning_rate': [0.001, 0.1],
+        'num_epochs': [20, 50],
+        'dropout_rate': [0.1, 0.6],
+        'weight_decay': [0.001, 0.1],
+        'activation': ['relu', 'leakyrelu']
+    }
 
+    # Generate all combinations of hyperparameters
+    params = [
+        (hidden_units, learning_rate, num_epochs, dropout_rate, weight_decay, activation)
+        for hidden_units in param_grid['hidden_units']
+        for learning_rate in param_grid['learning_rate']
+        for num_epochs in param_grid['num_epochs']
+        for dropout_rate in param_grid['dropout_rate']
+        for weight_decay in param_grid['weight_decay']
+        for activation in param_grid['activation']
+    ]
+
+    # Run the experiments
+    results = run(params, validation=True)
+
+    # Print the results
+    print("\nGrid Search Results:")
+    table_columns = ['Hidden Units', 'Learning Rate', 'Num Epochs', 'Dropout Rate', 'Weight Decay', 'Activation', 'Best Test Accuracy']
+    table_data = [(*params, acc) for params, acc in zip(params, results)]
+    table = pd.DataFrame(table_data, columns=table_columns)
+    print(table)
+
+    # Runtime
+    print("Time elapsed: {:.2f}s".format(time.time() - start_time))

@@ -1,17 +1,17 @@
-import time
+# Importing libraries
 import pandas as pd
 import torch
 import numpy as np
 import json
 
 import dgl
-import dgl.function as fn
+from dgl.nn import GraphConv
 import torch.nn as nn
 import torch.nn.functional as F
-import tensorflow as tf
 
-from sklearn.metrics import classification_report
 
+import time
+start_time = time.time()
 
 def import_data(path):
     df=pd.read_csv(path)
@@ -61,7 +61,7 @@ def creating_graph(validation=True):
         # Add edges between each node and itself to preserve old node representations
         graph.add_edges(graph.nodes(), graph.nodes())
 
-        return graph, node_features, node_labels, train_mask, val_mask
+        return graph, node_features, node_labels, train_mask, val_mask, test_mask
 
     else:
         # Configuring graph
@@ -82,84 +82,83 @@ def creating_graph(validation=True):
 
         return graph, node_features, node_labels, train_mask, test_mask
 
+class GCN(nn.Module):
+    def __init__(self, in_feats, h_feats, num_classes):
+        super(GCN, self).__init__()
+        self.conv1 = GraphConv(in_feats, h_feats)
+        self.conv2 = GraphConv(h_feats, num_classes)
+        self.activation = nn.ReLU()
 
+    def forward(self, g, in_feat):
+        h = self.conv1(g, in_feat)
+        h = self.activation(h)
+        h = self.conv2(g, h)
+        h = self.activation(h)
+        return h
 
-class GCNLayer(nn.Module):
-    def __init__(self, in_feats, out_feats):
-        super(GCNLayer, self).__init__()
-        self.linear = nn.Linear(in_feats, out_feats)
+def train(g, model,features,labels,train_mask,val_mask,test_mask, epoch_number):
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
+    best_val_acc = 0
+    best_test_acc = 0
 
-    def forward(self, g, feature):
-        # Creating a local scope so that all the stored ndata and edata
-        # (such as the `'h'` ndata below) are automatically popped out
-        # when the scope exits.
-        with g.local_scope():
-            g.ndata['h'] = feature
-            g.update_all(gcn_msg, gcn_reduce)
-            h = g.ndata['h']
-            return self.linear(h)
+    for e in range(epoch_number):
+        # Forward
+        logits = model(g, features)
 
+        # Compute prediction
+        pred = logits.argmax(1)
 
-class Net(nn.Module):
-    def __init__(self):
-        super(Net, self).__init__()
-        self.layer1 = GCNLayer(30978, 10000)
-        self.layer2 = GCNLayer(10000, 1000)
-        self.layer3 = GCNLayer(1000, 2)
+        # Compute loss
+        # Note that you should only compute the losses of the nodes in the training set.
+        loss = F.cross_entropy(logits[train_mask], labels[train_mask])
 
-    def forward(self, g, features):
-        x0 = F.relu(self.layer1(g, features))
-        x1 = F.relu(self.layer2(g, x0))
-        x2 = self.layer3(g, x1)
-        return x2
+        # Compute accuracy on training/validation/test
+        train_acc = (pred[train_mask] == labels[train_mask]).float().mean()
+        val_acc = (pred[val_mask] == labels[val_mask]).float().mean()
+        test_acc = (pred[test_mask] == labels[test_mask]).float().mean()
 
+        # Save the best validation accuracy and the corresponding test accuracy.
+        if best_val_acc < val_acc:
+            best_val_acc = val_acc
+            best_test_acc = test_acc
 
-def evaluate(model, labels, mask, logits):
-    model.eval()
-    with torch.no_grad():
-        #logits = model(g, features)
-        logits = logits[mask]
-        labels = labels[mask]
-        _, indices = torch.max(logits, dim=1)
-        #correct = torch.sum(indices == labels)
-        acc = tf.reduce_mean(tf.cast(indices == labels, dtype=tf.float32))
-        report = classification_report(indices, labels)
-        return acc, report
+        # Backward
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
 
+        print('In epoch {}, loss: {:.3f}, val acc: {:.3f} (best {:.3f}), test acc: {:.3f} (best {:.3f})'.format(
+                e, loss, val_acc, best_val_acc, test_acc, best_test_acc))
 
 def run(epoch_num=100,validation=True):
 
     # Creating the graph
     if validation:
-        graph,node_features,node_labels,train_mask,val_mask=creating_graph()
+        graph,node_features,node_labels,train_mask,val_mask,test_mask=creating_graph()
     else:
         graph,node_features,node_labels,train_mask,test_mask=creating_graph(validation=False)
 
-    for epoch in range(epoch_num):
-        if epoch >=3:
-            t0 = time.time()
 
-        net.train()
-        logits = net(graph, node_features)
-        logp = F.log_softmax(logits, 1)
-        loss = F.nll_loss(logp[train_mask], node_labels[train_mask])
+    model = GCN(graph.ndata['feat'].shape[1], 50, 2)
 
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+    # print out the hyperparameters
+    print("Hyperparameters of the GCN model:")
+    print(f"Input feature dimension: {model.conv1._in_feats}")
+    print(f"Hidden feature dimension: {model.conv1._out_feats}")
+    print(f"Number of classes: {model.conv2._out_feats}")
+    print(f"Number of layers: {2}")
 
-        if epoch >=3:
-            dur.append(time.time() - t0)
+    # print out the model architecture
+    print("Architecture of the GCN model:")
+    print(model)
 
-        if validation:
-            acc, report = evaluate(net,node_labels, val_mask, logits)
-        else:
-            acc, report = evaluate(net,node_labels, test_mask, logits)
+    # print out the trainable parameters
+    print("Trainable parameters of the GCN model:")
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            print(name, param.data.shape)
 
-        print("Epoch {:05d} | Loss {:.4f} | Validation Acc {:.4f} | Time(s) {:.4f}".format(
-                epoch, loss.item(), acc, np.mean(dur)))
-        print('GCN Classification Report: \n {}'.format(report))
-
+    train(graph, model, node_features, node_labels, train_mask, val_mask, test_mask, epoch_num)
 
 if __name__ == "__main__":
 
@@ -172,17 +171,8 @@ if __name__ == "__main__":
     targets = import_data(targets_path)
     features_matrix= import_json_to_matrix(features_path)
 
-    # Massage passing
-    gcn_msg = fn.copy_u(u='h', out='m')
-    gcn_reduce = fn.mean(msg='m', out='h')
-
-    # Creating network
-    net = Net()
-    print(net)
-
-    # Defining Optimizer and stop parameter
-    optimizer = torch.optim.Adam(net.parameters(), lr=1e-2)
-    dur = []
-
     # Running
-    run(validation=False)
+    run(epoch_num=100)
+
+    # Runtime
+    print("time elapsed: {:.2f}s".format(time.time() - start_time))

@@ -9,6 +9,8 @@ from dgl.nn import GraphConv
 import torch.nn as nn
 import torch.nn.functional as F
 
+import time
+start_time = time.time()
 
 def import_data(path):
     df=pd.read_csv(path)
@@ -17,20 +19,20 @@ def import_data(path):
 def import_json_to_matrix(path):
     dictionary=json.load(open(path))
     dictionary = {str(k): [str(val) for val in v] for k, v in dictionary.items()}
-    matrix = np.zeros((len(dictionary), 7842), dtype=int)
+    matrix = np.zeros((len(dictionary), len(dictionary)), dtype=int)
     for key in dictionary.keys():
         for value in range(len(dictionary[key])):
             matrix[int(key)][int(dictionary[key][value])] = 1
-    matrix = matrix[:, np.any(matrix, axis=0)]
+
     return matrix
 
 def creating_graph(validation=True):
 
     # To tensor
     node_features = torch.tensor(features_matrix).float()
-    edges_src = torch.from_numpy(edges['node_1'].to_numpy())
-    edges_dst = torch.from_numpy(edges['node_2'].to_numpy())
-    node_labels = torch.from_numpy(targets['target'].to_numpy())
+    edges_src = torch.from_numpy(edges['id_1'].to_numpy())
+    edges_dst = torch.from_numpy(edges['id_2'].to_numpy())
+    node_labels = torch.from_numpy(targets['ml_target'].to_numpy())
 
     # Creating graph
     graph = dgl.graph((edges_src, edges_dst), num_nodes=targets.shape[0])
@@ -80,15 +82,17 @@ def creating_graph(validation=True):
         return graph, node_features, node_labels, train_mask, test_mask
 
 class GCN(nn.Module):
-    def __init__(self, in_feats, h_feats, num_classes):
+    def __init__(self, in_feats, h1_feats, h2_feats, num_classes):
         super(GCN, self).__init__()
-        self.conv1 = GraphConv(in_feats, h_feats)
-        self.conv2 = GraphConv(h_feats, num_classes)
+        self.conv1 = GraphConv(in_feats, h1_feats)
+        self.conv2 = GraphConv(h1_feats, h2_feats)
+        self.conv3 = GraphConv(h2_feats, num_classes)
+        self.activation = nn.ReLU()
 
     def forward(self, g, in_feat):
-        h = self.conv1(g, in_feat)
-        h = F.relu(h)
-        h = self.conv2(g, h)
+        h = self.activation(self.conv1(g, in_feat))
+        h = self.activation(self.conv2(g, h))
+        h = self.conv3(g, h)
         return h
 
 def train(g, model,features,labels,train_mask,val_mask,test_mask, epoch_number):
@@ -122,7 +126,8 @@ def train(g, model,features,labels,train_mask,val_mask,test_mask, epoch_number):
         loss.backward()
         optimizer.step()
 
-        print('In epoch {}, loss: {:.3f}, val acc: {:.3f} (best {:.3f}), test acc: {:.3f} (best {:.3f})'.format(
+        if e % 5 == 0:
+            print('In epoch {}, loss: {:.3f}, val acc: {:.3f} (best {:.3f}), test acc: {:.3f} (best {:.3f})'.format(
                 e, loss, val_acc, best_val_acc, test_acc, best_test_acc))
 
 def run(epoch_num=100,validation=True):
@@ -133,21 +138,41 @@ def run(epoch_num=100,validation=True):
     else:
         graph,node_features,node_labels,train_mask,test_mask=creating_graph(validation=False)
 
+    model = GCN(graph.ndata['feat'].shape[1], 1000, 50, 2)
 
-    model = GCN(graph.ndata['feat'].shape[1], 5000, 18)
+    # print out the hyperparameters
+    print("Hyperparameters of the GCN model:")
+    print(f"Input feature dimension: {model.conv1._in_feats}")
+    print(f"Hidden feature dimension 1: {model.conv1._out_feats}")
+    print(f"Hidden feature dimension 2: {model.conv2._out_feats}")
+    print(f"Number of classes: {model.conv3._out_feats}")
+    print(f"Number of layers: {3}")
+
+    # print out the model architecture
+    print("Architecture of the GCN model:")
+    print(model)
+
+    # print out the trainable parameters
+    print("Trainable parameters of the GCN model:")
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            print(name, param.data.shape)
+
     train(graph, model, node_features, node_labels, train_mask, val_mask, test_mask, epoch_num)
 
 if __name__ == "__main__":
 
     # Importing datasets
-    edges_path = '../../data/lasftm_asia/lastfm_asia_edges.csv'
-    targets_path = '../../data/lasftm_asia/lastfm_asia_target.csv'
-    features_path = '../../data/lasftm_asia/lastfm_asia_features.json'
+    edges_path = '../../data/Github/git_edges.csv'
+    targets_path = '../../data/GitHub/git_target.csv'
+    features_path = '../../data/GitHub/git.json'
 
     edges = import_data(edges_path)
     targets = import_data(targets_path)
     features_matrix= import_json_to_matrix(features_path)
 
     # Running
-    run(epoch_num=100)
+    run()
 
+    # Runtime
+    print("time elapsed: {:.2f}s".format(time.time() - start_time))
